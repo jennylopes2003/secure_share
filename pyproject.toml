@@ -1,0 +1,10 @@
+
+[project]
+name = "secure_share"
+version = "0.1"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
