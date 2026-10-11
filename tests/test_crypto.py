@@ -11,6 +11,7 @@ from app.crypto.file_crypto import (
     encrypt_file,
 )
 from app.crypto.signing import file_digest, sign_file, verify_file
+from app.storage.storage import StorageClient
 
 OWNER = Account.create()
 OTHER = Account.create()
@@ -163,3 +164,50 @@ def test_garbage_signature_is_false_not_error(reg):
 def test_digest_depends_on_every_input(reg):
     base = file_digest(CHAIN, CONTRACT, reg[0], OWNER.address, reg[1], reg[2])
     assert base != file_digest(CHAIN, CONTRACT, reg[0], OTHER.address, reg[1], reg[2])
+
+
+# ---------- storage ----------
+
+def test_storage_roundtrip(tmp_path):
+    store = StorageClient(tmp_path)
+    storage_id = store.put(b"ciphertext bytes")
+    assert len(storage_id) == 32
+    assert store.get(storage_id) == b"ciphertext bytes"
+    assert store.get(storage_id.hex()) == b"ciphertext bytes"  # hex form also works
+
+
+def test_storage_ids_are_unique(tmp_path):
+    store = StorageClient(tmp_path)
+    assert store.put(b"a") != store.put(b"a")
+
+
+def test_storage_missing_file(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        StorageClient(tmp_path).get(os.urandom(32))
+
+
+@pytest.mark.parametrize("bad", ["../../etc/passwd", b"short", "zz" * 32, 123, None])
+def test_storage_rejects_bad_ids(tmp_path, bad):
+    with pytest.raises(ValueError):
+        StorageClient(tmp_path).get(bad)
+
+
+def test_storage_rejects_empty_or_non_bytes(tmp_path):
+    store = StorageClient(tmp_path)
+    with pytest.raises(ValueError):
+        store.put(b"")
+    with pytest.raises(ValueError):
+        store.put("text")
+
+
+def test_tamper_changes_blob_and_is_detected(tmp_path):
+    file_id = os.urandom(32)
+    aad = build_aad(file_id, OWNER.address)
+    dek, blob = encrypt_file(b"important" * 20, aad)
+    store = StorageClient(tmp_path)
+    storage_id = store.put(blob)
+    store.tamper(storage_id)
+    stored = store.get(storage_id)
+    assert ciphertext_hash(stored) != ciphertext_hash(blob)
+    with pytest.raises(InvalidTag):
+        decrypt_file(dek, stored, aad)
