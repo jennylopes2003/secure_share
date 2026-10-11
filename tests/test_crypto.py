@@ -10,6 +10,7 @@ from app.crypto.file_crypto import (
     decrypt_file,
     encrypt_file,
 )
+from app.crypto.signing import file_digest, sign_file, verify_file
 
 OWNER = Account.create()
 OTHER = Account.create()
@@ -103,3 +104,62 @@ def test_ciphertext_hash_detects_change(ctx):
 def test_bad_file_id_rejected():
     with pytest.raises(ValueError):
         build_aad(b"short", OWNER.address)
+
+
+# ---------- signing ----------
+
+def _sign(file_id, ct_hash, storage_id, key=OWNER.key):
+    return sign_file(key, CHAIN, CONTRACT, file_id, ct_hash, storage_id)
+
+
+@pytest.fixture
+def reg():
+    return os.urandom(32), os.urandom(32), os.urandom(32)  # file_id, ct_hash, storage_id
+
+
+def _verify(sig, reg, owner=OWNER.address, chain=CHAIN, contract=CONTRACT):
+    file_id, ct_hash, storage_id = reg
+    return verify_file(owner, sig, chain, contract, file_id, ct_hash, storage_id)
+
+
+def test_sign_and_verify(reg):
+    sig = _sign(*reg)
+    assert len(sig) == 65
+    assert _verify(sig, reg)
+
+
+def test_signature_is_deterministic(reg):
+    assert _sign(*reg) == _sign(*reg)  # RFC 6979: no random nonce
+
+
+def test_wrong_owner_fails(reg):
+    assert not _verify(_sign(*reg), reg, owner=OTHER.address)
+
+
+def test_signature_from_other_key_fails(reg):
+    sig = _sign(*reg, key=OTHER.key)
+    assert not _verify(sig, reg)  # claimed owner is OWNER
+
+
+@pytest.mark.parametrize("position", [0, 1, 2])  # file_id, ct_hash, storage_id
+def test_altered_field_fails(reg, position):
+    sig = _sign(*reg)
+    changed = list(reg)
+    changed[position] = os.urandom(32)
+    assert not _verify(sig, tuple(changed))
+
+
+def test_other_chain_or_contract_fails(reg):
+    sig = _sign(*reg)
+    assert not _verify(sig, reg, chain=1)
+    assert not _verify(sig, reg, contract="0x70997970C51812dc3A010C7d01b50e0d17dc79C8")
+
+
+def test_garbage_signature_is_false_not_error(reg):
+    assert _verify(b"\x00" * 65, reg) is False
+    assert _verify(b"short", reg) is False
+
+
+def test_digest_depends_on_every_input(reg):
+    base = file_digest(CHAIN, CONTRACT, reg[0], OWNER.address, reg[1], reg[2])
+    assert base != file_digest(CHAIN, CONTRACT, reg[0], OTHER.address, reg[1], reg[2])
