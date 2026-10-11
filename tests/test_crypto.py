@@ -12,6 +12,9 @@ from app.crypto.file_crypto import (
 )
 from app.crypto.signing import file_digest, sign_file, verify_file
 from app.storage.storage import StorageClient
+from app.crypto import keystore
+from app.crypto.keystore import KeystoreError, WrongPassphrase
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 OWNER = Account.create()
 OTHER = Account.create()
@@ -211,3 +214,80 @@ def test_tamper_changes_blob_and_is_detected(tmp_path):
     assert ciphertext_hash(stored) != ciphertext_hash(blob)
     with pytest.raises(InvalidTag):
         decrypt_file(dek, stored, aad)
+
+
+# ---------- keystore ----------
+
+PW = "correct horse battery"
+
+
+@pytest.fixture(scope="module")
+def ks_dir(tmp_path_factory):
+    folder = tmp_path_factory.mktemp("keystores")
+    keystore.create_user("alice", PW, directory=folder)
+    return folder
+
+
+def test_public_info(ks_dir):
+    info = keystore.get_public_info("alice", directory=ks_dir)
+    assert info["address"].startswith("0x") and len(info["address"]) == 42
+    assert len(info["enc_public_key"]) == 32
+
+
+def test_signing_key_matches_address(ks_dir):
+    key = keystore.load_signing_key("alice", PW, directory=ks_dir)
+    assert Account.from_key(key).address == keystore.get_public_info("alice", directory=ks_dir)["address"]
+
+
+def test_encryption_key_matches_public(ks_dir):
+    private = keystore.load_enc_private_key("alice", PW, directory=ks_dir)
+    public = private.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    assert public == keystore.get_public_info("alice", directory=ks_dir)["enc_public_key"]
+
+
+def test_wrong_passphrase_rejected(ks_dir):
+    with pytest.raises(WrongPassphrase):
+        keystore.load_signing_key("alice", "not the passphrase", directory=ks_dir)
+    with pytest.raises(WrongPassphrase):
+        keystore.load_enc_private_key("alice", "not the passphrase", directory=ks_dir)
+
+
+def test_vault_roundtrip(ks_dir):
+    file_id, dek = os.urandom(32), os.urandom(32)
+    keystore.save_dek("alice", PW, file_id, dek, directory=ks_dir)
+    assert keystore.load_dek("alice", PW, file_id, directory=ks_dir) == dek
+    assert file_id in keystore.list_files("alice", directory=ks_dir)
+
+
+def test_vault_wrong_passphrase_writes_nothing(ks_dir):
+    before = keystore.list_files("alice", directory=ks_dir)
+    with pytest.raises(WrongPassphrase):
+        keystore.save_dek("alice", "wrong passphrase", os.urandom(32), os.urandom(32), directory=ks_dir)
+    assert keystore.list_files("alice", directory=ks_dir) == before
+
+
+def test_missing_dek(ks_dir):
+    with pytest.raises(KeystoreError):
+        keystore.load_dek("alice", PW, os.urandom(32), directory=ks_dir)
+
+
+def test_keystore_file_has_no_plaintext_secrets(ks_dir):
+    key = keystore.load_signing_key("alice", PW, directory=ks_dir)
+    text = (ks_dir / "alice.json").read_text()
+    assert key.hex() not in text
+
+
+def test_duplicate_user_rejected(ks_dir):
+    with pytest.raises(KeystoreError):
+        keystore.create_user("alice", PW, directory=ks_dir)
+
+
+@pytest.mark.parametrize("bad", ["../evil", "", "A B", "a" * 40, "x/y"])
+def test_bad_user_names_rejected(ks_dir, bad):
+    with pytest.raises(KeystoreError):
+        keystore.create_user(bad, PW, directory=ks_dir)
+
+
+def test_short_passphrase_rejected(ks_dir):
+    with pytest.raises(KeystoreError):
+        keystore.create_user("bob", "short", directory=ks_dir)
