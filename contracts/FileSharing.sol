@@ -1,169 +1,340 @@
-import json
-import os
-from pathlib import Path
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
 
-from dotenv import load_dotenv
-from web3 import Web3
+/**
+ * @title FileSharing
+ * @notice Blockchain access-control layer for Secure Share.
+ * @dev Stores metadata, request state and wrapped-key payloads.
+ *      Plaintext files and raw encryption keys must never be stored on-chain.
+ */
+contract FileSharing {
 
-
-# Project paths
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-CONTRACT_DATA_FILE = PROJECT_ROOT / "app" / "blockchain" / "contract_data.json"
-ENV_FILE = PROJECT_ROOT / ".env"
-
-SEPOLIA_CHAIN_ID = 11155111
-
-
-def deploy_contract():
-    print("Loading deployment configuration...")
-
-    # Load secrets from .env
-    load_dotenv(ENV_FILE)
-
-    rpc_url = os.getenv("SEPOLIA_RPC_URL")
-    private_key = os.getenv("PRIVATE_KEY")
-
-    if not rpc_url:
-        raise ValueError("SEPOLIA_RPC_URL is missing from .env")
-
-    if not private_key:
-        raise ValueError("PRIVATE_KEY is missing from .env")
-
-    # Connect to Sepolia
-    web3 = Web3(Web3.HTTPProvider(rpc_url))
-
-    if not web3.is_connected():
-        raise ConnectionError("Could not connect to Ethereum Sepolia")
-
-    print("Connected to Ethereum network.")
-    print("Chain ID:", web3.eth.chain_id)
-
-    if web3.eth.chain_id != SEPOLIA_CHAIN_ID:
-        raise ValueError(
-            f"Wrong network. Expected Sepolia chain ID "
-            f"{SEPOLIA_CHAIN_ID}, got {web3.eth.chain_id}"
-        )
-
-    # Load deployment account
-    account = web3.eth.account.from_key(private_key)
-
-    print("Deployment account:", account.address)
-
-    balance = web3.eth.get_balance(account.address)
-    print(
-        "Account balance:",
-        web3.from_wei(balance, "ether"),
-        "ETH"
-    )
-
-    if balance == 0:
-        raise ValueError("Deployment account has no Sepolia ETH")
-
-    # Load compiled contract information
-    if not CONTRACT_DATA_FILE.exists():
-        raise FileNotFoundError(
-            "contract_data.json not found. Run compile_contract.py first."
-        )
-
-    with open(CONTRACT_DATA_FILE, "r", encoding="utf-8") as file:
-        contract_data = json.load(file)
-
-    abi = contract_data["abi"]
-    bytecode = contract_data["bytecode"]
-
-    if not bytecode:
-        raise ValueError("Contract bytecode is missing")
-
-    # Create contract factory
-    FileSharing = web3.eth.contract(
-        abi=abi,
-        bytecode=bytecode
-    )
-
-    print("Preparing FileSharing deployment...")
-
-    # Get transaction values
-    nonce = web3.eth.get_transaction_count(
-        account.address,
-        "pending"
-    )
-
-    latest_block = web3.eth.get_block("latest")
-    base_fee = latest_block.get("baseFeePerGas")
-
-    transaction_options = {
-        "from": account.address,
-        "nonce": nonce,
-        "chainId": SEPOLIA_CHAIN_ID,
+    enum RequestStatus {
+        None,
+        Pending,
+        Approved,
+        Rejected,
+        Revoked
     }
 
-    # Sepolia supports EIP-1559 transactions
-    if base_fee is not None:
-        priority_fee = web3.to_wei(1, "gwei")
+    struct FileRecord {
+        address owner;
+        bytes32 ctHash;
+        bytes32 storageId;
+        bytes signature;
+        uint256 registeredAt;
+        bool exists;
+    }
 
-        transaction_options["maxPriorityFeePerGas"] = priority_fee
-        transaction_options["maxFeePerGas"] = (
-            base_fee * 2 + priority_fee
+    struct AccessRequest {
+        RequestStatus status;
+        bytes wrappedKey;
+        uint256 requestedAt;
+        uint256 updatedAt;
+    }
+
+    mapping(bytes32 => FileRecord) private files;
+
+    mapping(bytes32 => mapping(address => AccessRequest))
+        private accessRequests;
+
+    event FileRegistered(
+        bytes32 indexed fileId,
+        address indexed owner,
+        bytes32 ctHash,
+        bytes32 storageId
+    );
+
+    event AccessRequested(
+        bytes32 indexed fileId,
+        address indexed requester
+    );
+
+    event AccessApproved(
+        bytes32 indexed fileId,
+        address indexed owner,
+        address indexed requester
+    );
+
+    event AccessRejected(
+        bytes32 indexed fileId,
+        address indexed owner,
+        address indexed requester
+    );
+
+    event AccessRevoked(
+        bytes32 indexed fileId,
+        address indexed owner,
+        address indexed requester
+    );
+
+    modifier fileExists(bytes32 fileId) {
+        require(files[fileId].exists, "File does not exist");
+        _;
+    }
+
+    modifier onlyOwner(bytes32 fileId) {
+        require(files[fileId].owner == msg.sender, "Not file owner");
+        _;
+    }
+
+    /**
+     * Register encrypted-file metadata.
+     */
+    function registerFile(
+        bytes32 fileId,
+        bytes32 ctHash,
+        bytes32 storageId,
+        bytes calldata signature
+    ) external {
+        require(fileId != bytes32(0), "Invalid file ID");
+        require(ctHash != bytes32(0), "Invalid ciphertext hash");
+        require(storageId != bytes32(0), "Invalid storage ID");
+        require(!files[fileId].exists, "File already registered");
+
+        files[fileId] = FileRecord({
+            owner: msg.sender,
+            ctHash: ctHash,
+            storageId: storageId,
+            signature: signature,
+            registeredAt: block.timestamp,
+            exists: true
+        });
+
+        emit FileRegistered(
+            fileId,
+            msg.sender,
+            ctHash,
+            storageId
+        );
+    }
+
+    /**
+     * Request access to a registered file.
+     */
+    function requestAccess(
+        bytes32 fileId
+    ) external fileExists(fileId) {
+
+        require(
+            msg.sender != files[fileId].owner,
+            "Owner cannot request own file"
+        );
+
+        RequestStatus current =
+            accessRequests[fileId][msg.sender].status;
+
+        require(
+            current == RequestStatus.None,
+            "Request already exists"
+        );
+
+        accessRequests[fileId][msg.sender] = AccessRequest({
+            status: RequestStatus.Pending,
+            wrappedKey: "",
+            requestedAt: block.timestamp,
+            updatedAt: block.timestamp
+        });
+
+        emit AccessRequested(fileId, msg.sender);
+    }
+
+    /**
+     * Approve a pending request and store the wrapped key
+     * intended only for that requester.
+     */
+    function approveRequest(
+        bytes32 fileId,
+        address requester,
+        bytes calldata wrappedKey
+    )
+        external
+        fileExists(fileId)
+        onlyOwner(fileId)
+    {
+        require(
+            requester != address(0),
+            "Invalid requester"
+        );
+
+        AccessRequest storage request =
+            accessRequests[fileId][requester];
+
+        require(
+            request.status == RequestStatus.Pending,
+            "Request is not pending"
+        );
+
+        require(
+            wrappedKey.length > 0,
+            "Wrapped key cannot be empty"
+        );
+
+        request.status = RequestStatus.Approved;
+        request.wrappedKey = wrappedKey;
+        request.updatedAt = block.timestamp;
+
+        emit AccessApproved(
+            fileId,
+            msg.sender,
+            requester
+        );
+    }
+
+    /**
+     * Reject a pending request.
+     */
+    function rejectRequest(
+        bytes32 fileId,
+        address requester
+    )
+        external
+        fileExists(fileId)
+        onlyOwner(fileId)
+    {
+        AccessRequest storage request =
+            accessRequests[fileId][requester];
+
+        require(
+            request.status == RequestStatus.Pending,
+            "Request is not pending"
+        );
+
+        request.status = RequestStatus.Rejected;
+        request.updatedAt = block.timestamp;
+
+        emit AccessRejected(
+            fileId,
+            msg.sender,
+            requester
+        );
+    }
+
+    /**
+     * Revoke previously approved access.
+     *
+     * Revocation prevents the contract from treating the
+     * requester as currently approved. It cannot recover
+     * a key that the requester already obtained.
+     */
+    function revokeAccess(
+        bytes32 fileId,
+        address requester
+    )
+        external
+        fileExists(fileId)
+        onlyOwner(fileId)
+    {
+        AccessRequest storage request =
+            accessRequests[fileId][requester];
+
+        require(
+            request.status == RequestStatus.Approved,
+            "Request is not approved"
+        );
+
+        request.status = RequestStatus.Revoked;
+
+        // Remove the on-chain wrapped-key payload from current state.
+        delete request.wrappedKey;
+
+        request.updatedAt = block.timestamp;
+
+        emit AccessRevoked(
+            fileId,
+            msg.sender,
+            requester
+        );
+    }
+
+    /**
+     * Return the current request state.
+     */
+    function getStatus(
+        bytes32 fileId,
+        address requester
+    )
+        external
+        view
+        fileExists(fileId)
+        returns (RequestStatus)
+    {
+        return accessRequests[fileId][requester].status;
+    }
+
+    /**
+     * Return the wrapped key only when access is approved.
+     */
+    function getWrappedKey(
+        bytes32 fileId
+    )
+        external
+        view
+        fileExists(fileId)
+        returns (bytes memory)
+    {
+        AccessRequest storage request =
+            accessRequests[fileId][msg.sender];
+
+        require(
+            request.status == RequestStatus.Approved,
+            "Access is not approved"
+        );
+
+        return request.wrappedKey;
+    }
+
+    /**
+     * Return registered file metadata.
+     */
+    function getFile(
+        bytes32 fileId
+    )
+        external
+        view
+        fileExists(fileId)
+        returns (
+            address owner,
+            bytes32 ctHash,
+            bytes32 storageId,
+            bytes memory signature,
+            uint256 registeredAt
         )
-    else:
-        transaction_options["gasPrice"] = web3.eth.gas_price
+    {
+        FileRecord storage record = files[fileId];
 
-    # Estimate deployment gas
-    estimated_gas = FileSharing.constructor().estimate_gas(
-        transaction_options
+        return (
+            record.owner,
+            record.ctHash,
+            record.storageId,
+            record.signature,
+            record.registeredAt
+        );
+    }
+
+    /**
+     * Return request information for integration/testing.
+     */
+    function getRequest(
+        bytes32 fileId,
+        address requester
     )
+        external
+        view
+        fileExists(fileId)
+        returns (
+            RequestStatus status,
+            uint256 requestedAt,
+            uint256 updatedAt
+        )
+    {
+        AccessRequest storage request =
+            accessRequests[fileId][requester];
 
-    transaction_options["gas"] = int(estimated_gas * 1.2)
-
-    print("Estimated gas:", estimated_gas)
-
-    # Build deployment transaction
-    transaction = FileSharing.constructor().build_transaction(
-        transaction_options
-    )
-
-    # Sign locally
-    signed_transaction = web3.eth.account.sign_transaction(
-        transaction,
-        private_key=private_key
-    )
-
-    print("Sending deployment transaction...")
-
-    # Send transaction
-    tx_hash = web3.eth.send_raw_transaction(
-        signed_transaction.raw_transaction
-    )
-
-    print("Transaction hash:", tx_hash.hex())
-    print("Waiting for confirmation...")
-
-    # Wait for Sepolia confirmation
-    receipt = web3.eth.wait_for_transaction_receipt(
-        tx_hash,
-        timeout=300
-    )
-
-    if receipt.status != 1:
-        raise RuntimeError("Contract deployment failed")
-
-    contract_address = receipt.contractAddress
-
-    print("SUCCESS - FileSharing deployed")
-    print("Contract address:", contract_address)
-    print("Block number:", receipt.blockNumber)
-
-    # Save deployed address into contract_data.json
-    contract_data["address"] = contract_address
-    contract_data["network"] = "sepolia"
-    contract_data["chain_id"] = SEPOLIA_CHAIN_ID
-    contract_data["deployment_tx"] = tx_hash.hex()
-
-    with open(CONTRACT_DATA_FILE, "w", encoding="utf-8") as file:
-        json.dump(contract_data, file, indent=4)
-
-    print("contract_data.json updated successfully.")
-
-
-if __name__ == "__main__":
-    deploy_contract()
+        return (
+            request.status,
+            request.requestedAt,
+            request.updatedAt
+        );
+    }
+}
