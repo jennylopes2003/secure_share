@@ -4,3 +4,4 @@ eth-account>=0.11
 eth-utils>=3
 eth-abi>=4
 pytest>=8
+web3==8.0.0
