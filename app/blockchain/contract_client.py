@@ -142,11 +142,14 @@ class FileSharingContractClient:
         )
         return self._send_transaction(function, private_key)
 
-    def request_access(self, file_id, private_key=None):
-        """Request access as the selected user."""
+    def request_access(self, file_id, enc_pub_key, private_key=None):
+        """Request access, sending the requester's 32-byte X25519 public key."""
         self._require_contract()
 
-        function = self.contract.functions.requestAccess(file_id)
+        function = self.contract.functions.requestAccess(
+            file_id,
+            enc_pub_key,
+        )
         return self._send_transaction(function, private_key)
 
     def approve_request(
@@ -218,6 +221,18 @@ class FileSharingContractClient:
             requester,
         ).call()
 
+    def get_enc_pub_key(self, file_id, requester):
+        """Return the 32-byte encryption public key the requester submitted."""
+        self._require_contract()
+
+        requester = Web3.to_checksum_address(requester)
+
+        return self.contract.functions.getEncPubKey(
+            file_id,
+            requester,
+        ).call()
+
+    
     def get_status(self, file_id, requester):
         """Return the numeric RequestStatus enum value."""
         self._require_contract()

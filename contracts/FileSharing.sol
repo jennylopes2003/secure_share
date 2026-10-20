@@ -35,6 +35,7 @@ contract FileSharing {
 
     struct AccessRequest {
         RequestStatus status;
+        bytes32 encPubKey;
         bytes wrappedKey;
         uint256 requestedAt;
         uint256 updatedAt;
@@ -54,7 +55,8 @@ contract FileSharing {
 
     event AccessRequested(
         bytes32 indexed fileId,
-        address indexed requester
+        address indexed requester,
+        bytes32 encPubKey
     );
 
     event AccessApproved(
@@ -208,12 +210,15 @@ contract FileSharing {
      * Request access to a registered file.
      */
     function requestAccess(
-        bytes32 fileId
+        bytes32 fileId,
+        bytes32 encPubKey
     ) external fileExists(fileId) {
         require(
             msg.sender != files[fileId].owner,
             "Owner cannot request own file"
         );
+
+        require(encPubKey != bytes32(0), "Invalid encryption key");
 
         RequestStatus current =
             accessRequests[fileId][msg.sender].status;
@@ -225,12 +230,13 @@ contract FileSharing {
 
         accessRequests[fileId][msg.sender] = AccessRequest({
             status: RequestStatus.Pending,
+            encPubKey: encPubKey,
             wrappedKey: "",
             requestedAt: block.timestamp,
             updatedAt: block.timestamp
         });
 
-        emit AccessRequested(fileId, msg.sender);
+        emit AccessRequested(fileId, msg.sender, encPubKey);
     }
 
     /**
@@ -412,4 +418,23 @@ contract FileSharing {
             request.updatedAt
         );
     }
+     function getEncPubKey(
+        bytes32 fileId,
+        address requester
+    )
+        external
+        view
+        fileExists(fileId)
+        returns (bytes32)
+    {
+        AccessRequest storage request =
+            accessRequests[fileId][requester];
+
+        require(
+            request.status != RequestStatus.None,
+            "Request does not exist"
+        );
+
+        return request.encPubKey;
+    }   
 }
