@@ -14,7 +14,8 @@ from web3 import Web3
 
 
 ROOT = Path(__file__).resolve().parent.parent.parent
-CONTRACT_DATA_FILE = ROOT / "app" / "blockchain" / "contract_data.json"
+DEFAULT_CONTRACT_DATA_FILE = ROOT / "app" / "blockchain" / "contract_data.json"
+CONTRACT_DATA_FILE = DEFAULT_CONTRACT_DATA_FILE
 
 DEFAULT_RPC_URL = "https://ethereum-sepolia-rpc.publicnode.com"
 SEPOLIA_CHAIN_ID = 11155111
@@ -35,6 +36,7 @@ class FileSharingContractClient:
 
         self.rpc_url = (
             rpc_url
+            or os.getenv("RPC_URL")
             or os.getenv("SEPOLIA_RPC_URL")
             or DEFAULT_RPC_URL
         )
@@ -46,20 +48,21 @@ class FileSharingContractClient:
         self.account = None
         self.contract_data = None
 
-        self.contract_data_file = Path(
-            contract_data_file or CONTRACT_DATA_FILE
+        configured_data_file = (
+            contract_data_file
+            or os.getenv("CONTRACT_DATA_FILE")
+            or CONTRACT_DATA_FILE
         )
+        self.contract_data_file = Path(configured_data_file)
+        if not self.contract_data_file.is_absolute():
+            self.contract_data_file = ROOT / self.contract_data_file
 
         self._load_contract_data(contract_address)
 
-        initial_key = (
-            private_key
-            if private_key is not None
-            else os.getenv("PRIVATE_KEY")
-        )
-
-        if initial_key:
-            self.set_account(initial_key)
+        # User transaction keys must be supplied explicitly. The deployment
+        # key in .env is intentionally not used here.
+        if private_key is not None:
+            self.set_account(private_key)
 
     def is_connected(self):
         """Return whether the Ethereum provider is connected."""
@@ -233,6 +236,21 @@ class FileSharingContractClient:
         ).call()
 
     
+    def get_events(self, event_name, from_block=0, **filters):
+        """Return decoded contract events, optionally filtered by indexed args."""
+        self._require_contract()
+
+        try:
+            event_factory = getattr(self.contract.events, event_name)
+        except AttributeError as exc:
+            raise ValueError(f"Unknown contract event: {event_name}") from exc
+
+        return event_factory().get_logs(
+            from_block=from_block,
+            to_block="latest",
+            argument_filters=filters or None,
+        )
+
     def get_status(self, file_id, requester):
         """Return the numeric RequestStatus enum value."""
         self._require_contract()
