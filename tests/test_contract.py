@@ -772,3 +772,43 @@ def test_client_signs_transactions_with_different_user_keys(
 
     assert revoke_receipt.status == 1
     assert not client.has_access(env["file_id"], env["bob"])
+
+
+def test_client_get_events_filters_access_requests(environment, tmp_path):
+    """The client returns decoded events and supports indexed argument filters."""
+    import json
+
+    from app.blockchain.contract_client import FileSharingContractClient
+
+    env = environment
+    register_file(env)
+    request_receipt = request_file(env)
+
+    config_path = tmp_path / "local_contract_data.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "contractName": "FileSharing",
+                "abi": env["contract"].abi,
+                "address": env["contract"].address,
+                "chain_id": env["web3"].eth.chain_id,
+                "network": "local-test",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    client = FileSharingContractClient(
+        web3=env["web3"],
+        contract_data_file=config_path,
+    )
+
+    events = client.get_events("AccessRequested", fileId=env["file_id"])
+
+    assert len(events) == 1
+    assert events[0]["args"]["fileId"] == env["file_id"]
+    assert events[0]["args"]["requester"] == env["bob"]
+    assert events[0]["args"]["encPubKey"] == BOB_ENC_KEY
+    assert events[0]["blockNumber"] == request_receipt.blockNumber
+
+    assert client.get_events("AccessRequested", fileId=value32(9999)) == []
