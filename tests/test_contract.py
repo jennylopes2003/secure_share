@@ -32,6 +32,7 @@ def value32(number):
     """Produce a distinct bytes32 test value."""
     return number.to_bytes(32, byteorder="big")
 
+BOB_ENC_KEY = value32(4242)
 
 @pytest.fixture(scope="session")
 def compiled_contract():
@@ -139,7 +140,8 @@ def register_file(
 def request_file(env):
     """Create a pending request from Bob."""
     tx_hash = env["contract"].functions.requestAccess(
-        env["file_id"]
+        env["file_id"],
+        BOB_ENC_KEY,
     ).transact({"from": env["bob"]})
 
     return env["web3"].eth.wait_for_transaction_receipt(tx_hash)
@@ -315,7 +317,8 @@ def test_request_unknown_file_reverts(environment):
 
     with pytest.raises(TransactionFailed, match="File does not exist"):
         env["contract"].functions.requestAccess(
-            value32(777)
+            value32(777),
+            BOB_ENC_KEY,
         ).transact({"from": env["bob"]})
 
 
@@ -328,7 +331,8 @@ def test_owner_cannot_request_own_file(environment):
         match="Owner cannot request own file",
     ):
         env["contract"].functions.requestAccess(
-            env["file_id"]
+            env["file_id"],
+            BOB_ENC_KEY,
         ).transact({"from": env["alice"]})
 
 
@@ -351,6 +355,7 @@ def test_request_succeeds_and_emits_event(environment):
 
     assert args["fileId"] == env["file_id"]
     assert args["requester"] == env["bob"]
+    assert args["encPubKey"] == BOB_ENC_KEY
 
 
 def test_duplicate_pending_request_reverts(environment):
@@ -360,10 +365,44 @@ def test_duplicate_pending_request_reverts(environment):
 
     with pytest.raises(TransactionFailed, match="Request already exists"):
         env["contract"].functions.requestAccess(
-            env["file_id"]
+            env["file_id"],
+            BOB_ENC_KEY,
         ).transact({"from": env["bob"]})
 
 
+def test_zero_encryption_key_reverts(environment):
+    env = environment
+    register_file(env)
+
+    with pytest.raises(TransactionFailed, match="Invalid encryption key"):
+        env["contract"].functions.requestAccess(
+            env["file_id"],
+            b"\x00" * 32,
+        ).transact({"from": env["bob"]})
+
+
+def test_owner_can_read_requester_encryption_key(environment):
+    env = environment
+    register_file(env)
+    request_file(env)
+
+    stored = env["contract"].functions.getEncPubKey(
+        env["file_id"],
+        env["bob"],
+    ).call()
+
+    assert stored == BOB_ENC_KEY
+
+
+def test_encryption_key_without_request_reverts(environment):
+    env = environment
+    register_file(env)
+
+    with pytest.raises(TransactionFailed, match="Request does not exist"):
+        env["contract"].functions.getEncPubKey(
+            env["file_id"],
+            env["bob"],
+        ).call()
 # -------------------------------------------------------
 # Owner-only decisions
 # -------------------------------------------------------
@@ -690,11 +729,13 @@ def test_client_signs_transactions_with_different_user_keys(
     # Bob signs his own request, overriding Alice's default key.
     request_receipt = client.request_access(
         env["file_id"],
+        BOB_ENC_KEY,
         private_key=env["bob_key"],
     )
 
     assert request_receipt.status == 1
     assert client.get_status(env["file_id"], env["bob"]) == PENDING
+    assert client.get_enc_pub_key(env["file_id"], env["bob"]) == BOB_ENC_KEY
 
     # The default account remains Alice.
     assert client.get_account_address() == env["alice"]
